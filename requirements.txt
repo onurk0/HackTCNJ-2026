@@ -1,6 +1,6 @@
 streamlit
 google-generativeai
 pymongo
-pypdf
+pypdf2
 python-dotenv
 pyvis
