@@ -1,6 +1,8 @@
 streamlit
-google-generativeai
+google-genai
 pymongo
 pypdf2
 python-dotenv
 pyvis
+certifi
+cryptography
