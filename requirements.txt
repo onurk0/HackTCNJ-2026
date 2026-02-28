@@ -4,4 +4,3 @@ pymongo
 pypdf2
 python-dotenv
 pyvis
-streamlit-pyvis
