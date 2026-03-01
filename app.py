@@ -27,6 +27,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 @dataclass
 class PaperMetadata:
     title: str
+    doi: Optional[str]
     authors: List[str]
     references: List[Dict[str, str]] # [{'title': str, 'year': str}]
     collection_id: str
@@ -77,12 +78,14 @@ class PaperDataManager:
     def save_paper(self, paper: PaperMetadata):
         """Persists paper metadata using upsert logic based on title, user, and collection."""
         try:
+            match_query = {"user_id": paper.user_id, "collection_id": paper.collection_id}
+            if paper.doi:
+                match_query["doi"] = paper.doi # Prioritize DOI
+            else:
+                match_query["title"] = paper.title # Fallback to Title
+
             self.db["papers"].update_one(
-                {
-                    "title": paper.title, 
-                    "collection_id": paper.collection_id, 
-                    "user_id": paper.user_id
-                },
+                match_query,
                 {"$set": asdict(paper)},
                 upsert=True
             )
@@ -109,10 +112,11 @@ class AIAnalyzer:
         # Limit text to context window constraints
         prompt = (
             "Analyze the following research paper text. "
-            "Return a JSON object with keys: 'title' (string), 'authors' (list of strings), "
-            "and 'references' (list of objects with 'title' and 'year'). "
-            "Focus on extracting the main title and the bibliography section.\n\n"
-            f"Text snippet: {text[:20000]}"
+            "Return a JSON object with keys: 'title' (string), 'doi' (string or null), "
+            "'authors' (list of strings), and 'references' (list of objects with 'title', "
+            "'doi' (string or null), and 'year'). "
+            "Extract the DOI for the main paper if available, and try to find DOIs for references.\n\n"
+            f"Text: {text[:16000]}"
         )
 
         try:
@@ -141,38 +145,45 @@ class GraphVisualizer:
         
         # Add all papers in the collection as main nodes
         for paper in papers:
-            # Use file_path or another unique ID for the node, not just title
-            node_id = paper.get('file_path', paper['title'])
-            if node_id not in added_nodes:
-                net.add_node(node_id, label=paper['title'], color=main_node_color, title="Main Paper", shape="box")
-                added_nodes.add(node_id)
+            # Uses DOIs as unique identifiers
+            paper_id = paper.get('doi') or paper['title']
+
+            if paper_id not in added_nodes:
+                net.add_node(paper_id, label=paper['title'][:30] + "...", color=main_node_color, title=paper['title'], shape="box")
+                added_nodes.add(paper_id)
             
-            # Add references as nodes and link them
-            for ref in paper.get('references', []):
-                ref_title = ref.get('title')
-                if ref_title:
-                    # Refs might be duplicates across papers, check if node exists
-                    if ref_title not in added_nodes:
-                        net.add_node(ref_title, color=ref_node_color, title="Reference", size = 10)
-                        added_nodes.add(ref_title)
-                    net.add_edge(node_id, ref_title, color = "#cccccc")
+            references = paper.get('references', [])
+            
+            for ref in references:
+                # If references are stored as stringified JSON in DB, 
+                # we might need to parse them, but usually Mongo handles this.
+                ref_id = ref.get('doi') or ref.get('title')
+                if not ref_id: continue
+                
+                if ref_id not in added_nodes:
+                    # Check if this ref exists in our collection via DOI
+                    is_in_collection = any(p.get('doi') == ref_id for p in papers)
                     
-        # ... (rest of the physics options remain the same)
+                    if is_in_collection:
+                        net.add_node(ref_id, label=ref.get('title')[:30] + "...", color=main_node_color, shape="box")
+                    else:
+                        net.add_node(ref_id, label=ref.get('title')[:30] + "...", color=ref_node_color, title=ref.get('title'))
+                    
+                    added_nodes.add(ref_id)
+                
+                net.add_edge(paper_id, ref_id) 
+        
         net.set_options("""
         var options = {
-          "layout": {
-            "hierarchical": {
-              "enabled": true,
-              "direction": "LR",
-              "sortMethod": "directed"
-            }
+          "nodes": {
+            "font": { "size": 12 }
           },
           "physics": {
             "barnesHut": {
-              "gravitationalConstant": -10000,
+              "gravitationalConstant": -8000,
               "centralGravity": 0.3,
-              "springLength": 250,
-              "springConstant": 0.01
+              "springLength": 150,
+              "springConstant": 0.04
             },
             "minVelocity": 0.75
           }
@@ -212,6 +223,7 @@ class GraphVisualizer:
         # Add and link reference nodes
         for ref in main_paper.references:
             ref_title = ref.get('title', 'Unknown')
+            doi=extracted_data.get('doi'),
             ref_year = ref.get('year', 'N/A')
             
             node_id = f"{ref_title} ({ref_year})"
@@ -381,20 +393,13 @@ def render_ui():
 
         st.divider()
         st.info("💡 Upload PDFs to create a graph for the active collection.")
-
+    
+    # --- MAIN CONTENT AREA ---
     if active_collection:
         st.subheader(f"Current Workspace: **{active_collection}**")
         
-        # Display existing papers in this collection
         saved_papers = db_manager.get_papers_by_collection(user_id, active_collection)
-        
-        if saved_papers:
-            st.write(f"Found {len(saved_papers)} saved papers.")
-            render_results(saved_papers, active_collection)
-        else:
-            st.info("No papers saved for this collection yet.")
 
-        # --- UPLOAD SECTION ---
         st.divider()
         st.subheader("Add Papers to Collection")
         uploaded_files = st.file_uploader(
@@ -404,40 +409,32 @@ def render_ui():
         )
 
         if uploaded_files:
-            # Container to show real-time processing
-            results_container = st.container()
+            with st.spinner("🧠 AI is reading new papers..."):
+                for uploaded_file in uploaded_files:
+                    file_path = save_file_to_server(uploaded_file)
+                    raw_text = parse_pdf(uploaded_file)
+                    extracted_data = ai_analyzer.extract_metadata(raw_text)
+
+                    # Create & Save object
+                    current_paper = PaperMetadata(
+                        title=extracted_data.get('title', 'Unknown'),
+                        doi=extracted_data.get('doi'),
+                        authors=extracted_data.get('authors', []),
+                        references=extracted_data.get('references', []),
+                        collection_id=active_collection, 
+                        user_id=user_id,
+                        file_path=file_path
+                    )
+                    db_manager.save_paper(current_paper)
             
-            with results_container:
-                with st.spinner("🧠 AI is reading all papers..."):
-                    all_papers_data = []
-                    
-                    for uploaded_file in uploaded_files:
-                        # 1. Save file to server
-                        file_path = save_file_to_server(uploaded_file)
+            saved_papers = db_manager.get_papers_by_collection(user_id, active_collection)
 
-                        # 2. Extract Text
-                        raw_text = parse_pdf(uploaded_file)
+        if saved_papers:
+            st.write(f"Found {len(saved_papers)} papers in collection.")
+            render_results(saved_papers, active_collection)
+        else:
+            st.info("No papers saved for this collection yet.")
 
-                        # 3. AI Analysis
-                        extracted_data = ai_analyzer.extract_metadata(raw_text)
-
-                        # 4. Create Dataclass Object
-                        current_paper = PaperMetadata(
-                            title=extracted_data.get('title', 'Unknown'),
-                            authors=extracted_data.get('authors', []),
-                            references=extracted_data.get('references', []),
-                            collection_id=active_collection, # Using active_collection
-                            user_id=user_id,
-                            file_path=file_path
-                        )
-
-                        # 5. Save to Database
-                        db_manager.save_paper(current_paper)
-                        all_papers_data.append(asdict(current_paper))
-
-                # Display Results
-                if all_papers_data:
-                    render_results(all_papers_data, active_collection)
     else:
         st.info("Please select or create a collection in the sidebar to begin.")
 
