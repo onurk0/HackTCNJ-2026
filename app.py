@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 from dataclasses import dataclass, asdict, field
+from streamlit_agraph import agraph, Node, Edge, Config
 
 # --- INITIALIZATION ---
 load_dotenv()
@@ -143,11 +144,17 @@ class AIAnalyzer:
 # --- VISUALIZATION LAYER ---
 class GraphVisualizer:
     @staticmethod
-    def generate_comprehensive_graph(papers: List[Dict[str, Any]], color_by_tag: str) -> str:
-        """Generates graph based on all papers in a collection."""
-        # Use notebook=False for Streamlit
-        net = Network(height="700px", width="100%", bgcolor="#ffffff", font_color="black", notebook=False, cdn_resources='remote')
+    def generate_comprehensive_graph(papers: List[Dict[str, Any]], color_by_tag: str):
+        """Generates a graph with interactivity using streamlit-agraph."""
+        for paper in papers:
+            if '_id' in paper and not isinstance(paper['_id'], str):
+                paper['_id'] = str(paper['_id'])
 
+        nodes = []
+        edges = []
+        added_nodes = set()
+        
+        # Color Map
         color_map = {
             "Unknown": "#aaaaaa",
             "Theoretical": "#3366cc",
@@ -155,68 +162,60 @@ class GraphVisualizer:
             "Review": "#109618",
             "Original Research": "#990099"
         }
-        
-        main_node_color = "#3366cc"
-        ref_node_color = "#ff9900"
-        
-        # Track added nodes to prevent duplicate ID errors
-        added_nodes = set()
-        
-        # Add all papers in the collection as main nodes
-        for paper in papers:
-            # Uses DOIs as unique identifiers
-            paper_id = paper.get('doi') or paper['title']
 
-            if paper_id not in added_nodes:
-                # Get the tag value, default to "Unknown"
-                tag_value = paper.get(color_by_tag, "Unknown")
-                
-                # Determine color based on value, hashing for consistent coloring
-                if tag_value not in color_map:
-                    color_map[tag_value] = f"#{hash(tag_value) & 0xFFFFFF:06x}"
-                node_color = color_map[tag_value]
-                tooltip = f"<b>{color_by_tag}:</b> {tag_value}<br><b>Type:</b> {paper.get('paper_type', 'N/A')}" 
-                net.add_node(paper_id, label=paper['title'][:20] + "...", color=node_color, title=tooltip, shape="box")
-                added_nodes.add(paper_id)
+        for paper in papers:
+            paper_id = paper.get('doi') or paper['title']
+            tag_value = paper.get(color_by_tag, "Unknown")
             
-            references = paper.get('references', [])
+            if tag_value not in color_map:
+                color_map[tag_value] = f"#{hash(tag_value) & 0xFFFFFF:06x}"
+            node_color = color_map[tag_value]
             
-            for ref in references:
-                # If references are stored as stringified JSON in DB, 
-                # we might need to parse them, but usually Mongo handles this.
+            # --- CREATE NODE WITH DATA ---
+            # Storing metadata in the 'data' parameter for click handling
+            nodes.append(Node(
+                id=paper_id,
+                label=paper['title'][:15],
+                size=20,
+                color=node_color,
+                title=f"{color_by_tag}: {tag_value}",
+                data=paper # Passing full paper metadata
+            ))
+            added_nodes.add(paper_id)
+            
+            # --- CREATE EDGES ---
+            for ref in paper.get('references', []):
                 ref_id = ref.get('doi') or ref.get('title')
                 if not ref_id: continue
-                
                 if ref_id not in added_nodes:
-                    # Check if this ref exists in our collection via DOI
-                    is_in_collection = any(p.get('doi') == ref_id for p in papers)
-                    
-                    if is_in_collection:
-                        net.add_node(ref_id, label=ref.get('title')[:30] + "...", color=main_node_color, shape="box")
-                    else:
-                        net.add_node(ref_id, label=ref.get('title')[:30] + "...", color=ref_node_color, title=ref.get('title'))
-                    
+                    nodes.append(Node(id=ref_id, label=ref.get('title')[:15], color="#999999"))
                     added_nodes.add(ref_id)
-                
-                net.add_edge(paper_id, ref_id) 
+                edges.append(Edge(source=paper_id, target=ref_id))
+
+        config = Config(width=700, height=700, directed=True, physics=True, hierarchical=False)
         
+        # --- RETURN THE GRAPH COMPONENT ---
+        return agraph(nodes=nodes, edges=edges, config=config)
+       
         net.set_options("""
         var options = {
           "nodes": {
-            "font": { "size": 12 }
+            "font": { "size": 12 },
+            "borderWidth": 2
+          },
+          "interaction": {
+            "hover": true,
+            "selectConnectedEdges": false
           },
           "physics": {
             "barnesHut": {
-              "gravitationalConstant": -8000,
-              "centralGravity": 0.3,
-              "springLength": 150,
-              "springConstant": 0.04
-            },
-            "minVelocity": 0.75
+              "gravitationalConstant": -10000,
+              "springLength": 200
+            }
           }
         }
         """)
-        
+       
         return net.generate_html()
 
     @staticmethod
@@ -233,10 +232,6 @@ class GraphVisualizer:
             cdn_resources='remote'
         )
         
-        # Styling nodes
-        main_node_color = "#3366cc"
-        ref_node_color = "#ff9900"
-        
         # Add central node (The uploaded paper)
         net.add_node(
             main_paper.title, 
@@ -250,7 +245,8 @@ class GraphVisualizer:
         # Add and link reference nodes
         for ref in main_paper.references:
             ref_title = ref.get('title', 'Unknown')
-            doi=extracted_data.get('doi'),
+            doi=ref.get('doi'),
+            # doi=extracted_data.get('doi'),
             ref_year = ref.get('year', 'N/A')
             
             node_id = f"{ref_title} ({ref_year})"
@@ -365,8 +361,40 @@ def generate_network_graph(main_title: str, references: List[Dict[str, Any]]) ->
 def render_results(papers: List[Dict[str, Any]], collection_id: str):
     """Displays dataframes and graphs for pre-loaded papers."""
     col1, col2 = st.columns([1, 2])
+
+    # Store the clicked node in session state to persist it
+    if "clicked_node_id" not in st.session_state:
+        st.session_state.clicked_node_id = None
+
     with col1:
         st.subheader("📄 Collection Data")
+
+        # If a node is clicked, find that paper and display it
+        if st.session_state.clicked_node_id:
+            selected_paper = next((p for p in papers if (p.get('doi') or p['title']) == st.session_state.clicked_node_id), None)
+            
+            if selected_paper:
+                st.write(f"### Selected: {selected_paper['title']}")
+                with st.expander("Details", expanded=True):
+                    st.write(f"**Field:** {selected_paper.get('field_of_study', 'Unknown')}")
+                    st.write(f"**Methodologies:** {', '.join(selected_paper.get('methodologies', []))}")
+                    st.write(f"**Type:** {selected_paper.get('paper_type', 'Unknown')}")
+                
+                if st.button("Back to List"):
+                    st.session_state.clicked_node_id = None
+                    st.rerun()
+            else:
+                # Fallback if the clicked node is just a reference (not in 'papers' list)
+                st.write("Reference node selected (no local file).")
+                if st.button("Back to List"):
+                    st.session_state.clicked_node_id = None
+                    st.rerun()
+
+        else:
+            # Default view: list all papers
+            for paper in papers:
+                with st.expander(f"{paper['title'][:30]}..."):
+                    st.write(f"**Field:** {paper.get('field_of_study', 'Unknown')}")
         
         # Display extracted tags in an expandable format
         for paper in papers:
@@ -374,9 +402,10 @@ def render_results(papers: List[Dict[str, Any]], collection_id: str):
                 st.write(f"**Field:** {paper.get('field_of_study', 'Unknown')}")
                 st.write(f"**Methodologies:** {', '.join(paper.get('methodologies', []))}")
                 st.write(f"**Type:** {paper.get('paper_type', 'Unknown')} ({paper.get('publication_type', 'Unknown')})")
-                st.write(f"**Perspective:** {paper.get('perspective', 'Unknown')}") 
+                st.write(f"**Perspective:** {paper.get('perspective', 'Unknown')}")
     with col2:
         st.subheader("🕸️ Comprehensive Citation Network")                
+        
         tag_options = {
             "Field of Study": "field_of_study",
             "Perspective": "perspective",
@@ -384,8 +413,13 @@ def render_results(papers: List[Dict[str, Any]], collection_id: str):
         }
         selected_tag_label = st.selectbox("Color Nodes By", list(tag_options.keys()))
         selected_tag_key = tag_options[selected_tag_label]
-        graph_html = GraphVisualizer.generate_comprehensive_graph(papers, selected_tag_key)
-        components.html(graph_html, height=720)
+
+        # --- CAPTURE CLICKED NODE ---
+        clicked_node = GraphVisualizer.generate_comprehensive_graph(papers, selected_tag_key)
+        
+        if clicked_node and clicked_node != st.session_state.clicked_node_id:
+            st.session_state.clicked_node_id = clicked_node
+            st.rerun()
 
 def render_ui():
     """Main UI rendering logic with collection management."""

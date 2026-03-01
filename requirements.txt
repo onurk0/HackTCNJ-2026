@@ -6,3 +6,4 @@ python-dotenv
 pyvis
 certifi
 cryptography
+streamlit-agraph
