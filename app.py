@@ -28,6 +28,7 @@ class PaperMetadata:
     title: str
     authors: List[str]
     references: List[Dict[str, str]] # [{'title': str, 'year': str}]
+    collection_id: str
     raw_text: Optional[str] = None
 
 
@@ -58,6 +59,23 @@ class PaperDataManager:
         except PyMongoError as e:
             st.error(f"Database connection failed: {e}")
             st.stop()
+
+    def get_papers_by_collection(self, collection_id: str):
+        """Fetches all papers belonging to a specific collection."""
+        return list(self.collection.find({"collection_id": collection_id}))
+
+    def save_paper(self, paper: PaperMetadata):
+        """Saves paper with a collection_id."""
+        self.collection.update_one(
+            {"title": paper.title, "collection_id": paper.collection_id},
+            {"$set": {
+                "title": paper.title,
+                "authors": paper.authors,
+                "references": paper.references,
+                "collection_id": paper.collection_id
+            }},
+            upsert=True
+        )
 
     def save_paper(self, paper: PaperMetadata):
         """Persists paper metadata using upsert logic."""
@@ -104,6 +122,47 @@ class AIAnalyzer:
 
 # --- VISUALIZATION LAYER ---
 class GraphVisualizer:
+    @staticmethod
+    def generate_comprehensive_graph(papers: List[PaperMetadata]) -> str:
+        """Generates graph based on all papers in a collection."""
+        net = Network(height="700px", width="100%", bgcolor="#ffffff", font_color="black", notebook=False, cdn_resources='remote')
+        
+        main_node_color = "#3366cc"
+        ref_node_color = "#ff9900"
+        
+        # Add all papers in the collection as main nodes
+        for paper in papers:
+            net.add_node(paper.title, color=main_node_color, title="Main Paper", shape="box")
+            
+            # 2. Add references as nodes and link them
+            for ref in paper.references:
+                ref_title = ref.get('title')
+                if ref_title:
+                    net.add_node(ref_title, color=ref_node_color, title="Reference", size = 10)
+                    net.add_edge(paper.title, ref_title, color = "#cccccc")
+        net.set_options("""
+        var options = {
+          "layout": {
+            "hierarchical": {
+              "enabled": true,
+              "direction": "LR",
+              "sortMethod": "directed"
+            }
+          },
+          "physics": {
+            "barnesHut": {
+              "gravitationalConstant": -10000,
+              "centralGravity": 0.3,
+              "springLength": 250,
+              "springConstant": 0.01
+            },
+            "minVelocity": 0.75
+          }
+        }
+        """)
+        
+        return net.generate_html()
+
     @staticmethod
     def generate_litmap_style(main_paper: PaperMetadata) -> str:
         """Generates a professional, interactive citation network graph."""
@@ -244,51 +303,70 @@ def render_ui():
     ai_analyzer = AIAnalyzer(GEMINI_API_KEY)
 
     with st.sidebar:
-        st.header("Upload Center")
-        uploaded_file = st.file_uploader("Choose a Research PDF", type="pdf")
+        st.header("1. Collection Name")
+        collection_id = st.text_input("Enter collection name", value="My Research")
         st.divider()
-        st.info("💡 Analysis covers the first 16,000 characters of the document.")
+        st.info("💡 Upload multiple PDFs to create a comprehensive graph.")
+        
+    st.subheader("Upload Papers")
+    uploaded_files = st.file_uploader(
+        "Upload Research PDFs", 
+        type="pdf", 
+        accept_multiple_files=True 
+    )
 
-    if uploaded_file:
-        with st.spinner("Analyzing document structure..."):
-            raw_text = parse_pdf(uploaded_file)
-            
-            if not raw_text:
-                st.warning("The PDF appears to be empty or unreadable.")
-                return
-
-            data = extract_paper_metadata(raw_text)
-
-            if "error" in data:
-                st.error(data["error"])
-                return
-            # Create Data Object
-            current_paper = PaperMetadata(
-                title=data.get('title', 'Unknown'),
-                authors=data.get('authors', []),
-                references=data.get('references', []),
-                raw_text=raw_text
-            )
-            
-            # Save to Database
-            db_manager.save_paper(current_paper)
-            
-            # Layout Results
-            col1, col2 = st.columns([1, 2])
-
-            with col1:
-                st.subheader("📄 Metadata")
-                st.write(f"**Title:** {current_paper.title}")
-                st.write(f"**Authors:** {', '.join(current_paper.authors)}")
+    if uploaded_files:
+        st.divider()
+        # Create a container for results
+        results_container = st.container()
+        
+        with results_container:
+            with st.spinner("🧠 AI is reading all papers..."):
+                all_papers_data = []
                 
-                st.subheader("📚 References")
-                st.dataframe(current_paper.references, use_container_width=True)
+                for uploaded_file in uploaded_files:
+                    raw_text = parse_pdf(uploaded_file)
+                    if not raw_text:
+                        continue
+
+                    # Extract Metadata
+                    extracted_data = ai_analyzer.extract_metadata(raw_text)
+                    
+                    if "error" in extracted_data:
+                        st.error(f"Error processing {uploaded_file.name}: {extracted_data['error']}")
+                        continue
+                    
+                    # Create Data Object (including Collection ID)
+                    current_paper = PaperMetadata(
+                        title=extracted_data.get('title', 'Unknown'),
+                        authors=extracted_data.get('authors', []),
+                        references=extracted_data.get('references', []),
+                        collection_id=collection_id, # Link to collection
+                        raw_text=raw_text
+                    )
+                    
+                    # Save to Database
+                    db_manager.save_paper(current_paper)
+                    all_papers_data.append(current_paper)
+
+            if all_papers_data:
+                # Layout Results
+                col1, col2 = st.columns([1, 2])
                 
-            with col2:
-                st.subheader("🕸️ Citation Network")
-                # Generate and render interactive graph
-                graph_html = GraphVisualizer.generate_litmap_style(current_paper)
-                components.html(graph_html, height=720)
+                with col1:
+                    st.subheader("📄 Collection Summary")
+                    st.write(f"**Collection:** {collection_id}")
+                    st.write(f"**Papers Analyzed:** {len(all_papers_data)}")
+                    
+                    # Display papers in a table
+                    paper_titles = [p.title for p in all_papers_data]
+                    st.dataframe(paper_titles, width='stretch')
+                    
+                with col2:
+                    st.subheader("🕸️ Comprehensive Citation Network")
+                    # Generate graph using ALL papers in the collection
+                    graph_html = GraphVisualizer.generate_comprehensive_graph(all_papers_data)
+                    components.html(graph_html, height=720)
 
 if __name__ == "__main__":
     render_ui()
