@@ -29,4 +29,16 @@ We built this with researches in mind who may not see the initial connection bet
 
   
 **Getting Started**
-  To access the our application, visit [Linked Lit](http://144.202.6.167:8501/) in your browser. 
+  To access the our application, visit [Linked Lit](http://144.202.6.167:8501/) in your browser.
+
+**Hosting Locally**
+** Natively **
+1. `python3 -m venv venv`
+2. `source venv/bin/activate`
+3. `pip install -r requirements.txt`
+4. `streamlit run app.py --server.address 0.0.0.0 --server.port 8501`
+** Docker **
+1. Build the Docker Image
+`sudo docker build -t hacktcnj .`
+2. Run Docker Container
+`docker run -p 8501:8501 --env-file .env hacktcnj`
