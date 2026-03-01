@@ -104,7 +104,6 @@ class PaperDataManager:
         except PyMongoError as e:
             st.error(f"Failed to query database: {e}")
             return []
-            st.error(f"Failed to save to database: {e}")
 
 # --- AI PROCESSING LAYER ---
 class AIAnalyzer:
@@ -144,10 +143,18 @@ class AIAnalyzer:
 # --- VISUALIZATION LAYER ---
 class GraphVisualizer:
     @staticmethod
-    def generate_comprehensive_graph(papers: List[Dict[str, Any]]) -> str:
+    def generate_comprehensive_graph(papers: List[Dict[str, Any]], color_by_tag: str) -> str:
         """Generates graph based on all papers in a collection."""
         # Use notebook=False for Streamlit
         net = Network(height="700px", width="100%", bgcolor="#ffffff", font_color="black", notebook=False, cdn_resources='remote')
+
+        color_map = {
+            "Unknown": "#aaaaaa",
+            "Theoretical": "#3366cc",
+            "Applied": "#ff9900",
+            "Review": "#109618",
+            "Original Research": "#990099"
+        }
         
         main_node_color = "#3366cc"
         ref_node_color = "#ff9900"
@@ -161,7 +168,15 @@ class GraphVisualizer:
             paper_id = paper.get('doi') or paper['title']
 
             if paper_id not in added_nodes:
-                net.add_node(paper_id, label=paper['title'][:30] + "...", color=main_node_color, title=paper['title'], shape="box")
+                # Get the tag value, default to "Unknown"
+                tag_value = paper.get(color_by_tag, "Unknown")
+                
+                # Determine color based on value, hashing for consistent coloring
+                if tag_value not in color_map:
+                    color_map[tag_value] = f"#{hash(tag_value) & 0xFFFFFF:06x}"
+                node_color = color_map[tag_value]
+                tooltip = f"<b>{color_by_tag}:</b> {tag_value}<br><b>Type:</b> {paper.get('paper_type', 'N/A')}" 
+                net.add_node(paper_id, label=paper['title'][:20] + "...", color=node_color, title=tooltip, shape="box")
                 added_nodes.add(paper_id)
             
             references = paper.get('references', [])
@@ -362,8 +377,14 @@ def render_results(papers: List[Dict[str, Any]], collection_id: str):
                 st.write(f"**Perspective:** {paper.get('perspective', 'Unknown')}") 
     with col2:
         st.subheader("🕸️ Comprehensive Citation Network")                
-        
-        graph_html = GraphVisualizer.generate_comprehensive_graph(papers)
+        tag_options = {
+            "Field of Study": "field_of_study",
+            "Perspective": "perspective",
+            "Paper Type": "paper_type"
+        }
+        selected_tag_label = st.selectbox("Color Nodes By", list(tag_options.keys()))
+        selected_tag_key = tag_options[selected_tag_label]
+        graph_html = GraphVisualizer.generate_comprehensive_graph(papers, selected_tag_key)
         components.html(graph_html, height=720)
 
 def render_ui():
