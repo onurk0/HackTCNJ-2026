@@ -2,6 +2,7 @@ import os
 import json
 import certifi
 import ssl
+import uuid
 import streamlit as st
 import streamlit.components.v1 as components
 from google import genai
@@ -11,7 +12,7 @@ from pyvis.network import Network
 from typing import Dict, Any, List, Optional
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 # --- INITIALIZATION ---
 load_dotenv()
@@ -29,7 +30,9 @@ class PaperMetadata:
     authors: List[str]
     references: List[Dict[str, str]] # [{'title': str, 'year': str}]
     collection_id: str
+    user_id: str 
     raw_text: Optional[str] = None
+    file_path: Optional[str] = None
 
 
 # --- RESOURCE MANAGEMENT ---
@@ -46,52 +49,54 @@ def get_ai_client() -> genai.Client:
 class PaperDataManager:
     def __init__(self, uri: str):
         self.uri = uri
-        self.collection = self._get_collection()
+        self.client = None
+        self.db = None
+        self._connect()
 
-    @st.cache_resource
-    def _get_collection(_self):
-        """Establishes MongoDB connection safely."""
+    def _connect(self):
+        """Establishes MongoDB connection securely."""
         try:
-            # Use standard SSL settings for Atlas
-            client = MongoClient(_self.uri, tlsCAFile=certifi.where())
-            client.admin.command('ping')
-            return client["research_db"]["papers"]
+            self.client = MongoClient(self.uri, tlsCAFile=certifi.where())
+            # Ping to confirm connection
+            self.client.admin.command('ping')
+            self.db = self.client["research_db"]
         except PyMongoError as e:
             st.error(f"Database connection failed: {e}")
             st.stop()
 
-    def get_papers_by_collection(self, collection_id: str):
-        """Fetches all papers belonging to a specific collection."""
-        return list(self.collection.find({"collection_id": collection_id}))
-
-    def save_paper(self, paper: PaperMetadata):
-        """Saves paper with a collection_id."""
-        self.collection.update_one(
-            {"title": paper.title, "collection_id": paper.collection_id},
-            {"$set": {
-                "title": paper.title,
-                "authors": paper.authors,
-                "references": paper.references,
-                "collection_id": paper.collection_id
-            }},
-            upsert=True
-        )
-
-    def save_paper(self, paper: PaperMetadata):
-        """Persists paper metadata using upsert logic."""
+    def get_collections(self, user_id: str) -> List[str]:
+        """Retrieves distinct collection names for a specific user."""
         try:
-            self.collection.update_one(
-                {"title": paper.title},
-                {"$set": {
-                    "title": paper.title,
-                    "authors": paper.authors,
-                    "references": paper.references
-                }},
+            papers = self.db["papers"].find({"user_id": user_id})
+            # Extract unique collection names
+            return list(set(p['collection_id'] for p in papers if 'collection_id' in p))
+        except PyMongoError as e:
+            st.error(f"Failed to fetch collections: {e}")
+            return []
+
+    def save_paper(self, paper: PaperMetadata):
+        """Persists paper metadata using upsert logic based on title, user, and collection."""
+        try:
+            self.db["papers"].update_one(
+                {
+                    "title": paper.title, 
+                    "collection_id": paper.collection_id, 
+                    "user_id": paper.user_id
+                },
+                {"$set": asdict(paper)},
                 upsert=True
             )
         except PyMongoError as e:
             st.error(f"Failed to save to database: {e}")
-
+            
+    def get_papers_by_collection(self, user_id: str, collection_id: str) -> List[Dict[str, Any]]:
+        """Retrieves all papers for a specific user and collection."""
+        try:
+            return list(self.db["papers"].find({"user_id": user_id, "collection_id": collection_id}))
+        except PyMongoError as e:
+            st.error(f"Failed to query database: {e}")
+            return []
+            st.error(f"Failed to save to database: {e}")
 
 # --- AI PROCESSING LAYER ---
 class AIAnalyzer:
@@ -123,23 +128,36 @@ class AIAnalyzer:
 # --- VISUALIZATION LAYER ---
 class GraphVisualizer:
     @staticmethod
-    def generate_comprehensive_graph(papers: List[PaperMetadata]) -> str:
+    def generate_comprehensive_graph(papers: List[Dict[str, Any]]) -> str:
         """Generates graph based on all papers in a collection."""
+        # Use notebook=False for Streamlit
         net = Network(height="700px", width="100%", bgcolor="#ffffff", font_color="black", notebook=False, cdn_resources='remote')
         
         main_node_color = "#3366cc"
         ref_node_color = "#ff9900"
         
+        # Track added nodes to prevent duplicate ID errors
+        added_nodes = set()
+        
         # Add all papers in the collection as main nodes
         for paper in papers:
-            net.add_node(paper.title, color=main_node_color, title="Main Paper", shape="box")
+            # Use file_path or another unique ID for the node, not just title
+            node_id = paper.get('file_path', paper['title'])
+            if node_id not in added_nodes:
+                net.add_node(node_id, label=paper['title'], color=main_node_color, title="Main Paper", shape="box")
+                added_nodes.add(node_id)
             
-            # 2. Add references as nodes and link them
-            for ref in paper.references:
+            # Add references as nodes and link them
+            for ref in paper.get('references', []):
                 ref_title = ref.get('title')
                 if ref_title:
-                    net.add_node(ref_title, color=ref_node_color, title="Reference", size = 10)
-                    net.add_edge(paper.title, ref_title, color = "#cccccc")
+                    # Refs might be duplicates across papers, check if node exists
+                    if ref_title not in added_nodes:
+                        net.add_node(ref_title, color=ref_node_color, title="Reference", size = 10)
+                        added_nodes.add(ref_title)
+                    net.add_edge(node_id, ref_title, color = "#cccccc")
+                    
+        # ... (rest of the physics options remain the same)
         net.set_options("""
         var options = {
           "layout": {
@@ -239,6 +257,17 @@ def parse_pdf(file) -> str:
         st.error(f"Failed to read PDF: {e}")
         return ""
 
+def save_file_to_server(uploaded_file) -> str:
+    """Saves file locally and returns the path."""
+    # Create a directory named 'storage' if it doesn't exist
+    os.makedirs("storage", exist_ok=True)
+    # Create a unique filename
+    file_path = f"storage/{uuid.uuid4()}_{uploaded_file.name}"
+    # Save the bytes
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return file_path
+
 @st.cache_data(show_spinner=False)
 def extract_paper_metadata(text: str) -> Dict[str, Any]:
     """Uses AI to extract structured metadata from raw text."""
@@ -293,80 +322,124 @@ def generate_network_graph(main_title: str, references: List[Dict[str, Any]]) ->
 
 
 # --- USER INTERFACE ---
+
+def render_results(papers: List[Dict[str, Any]], collection_id: str):
+    """Displays dataframes and graphs for pre-loaded papers."""
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("📄 Collection Summary")
+        st.write(f"**Collection:** {collection_id}")
+        st.write(f"**Papers:** {len(papers)}")
+        
+        # Extract titles from the list of dictionary documents
+        paper_titles = [p['title'] for p in papers]
+        st.dataframe(paper_titles, width='stretch')
+        
+    with col2:
+        st.subheader("🕸️ Comprehensive Citation Network")                
+        
+        graph_html = GraphVisualizer.generate_comprehensive_graph(papers)
+        components.html(graph_html, height=720)
+
 def render_ui():
-    """Main UI rendering logic."""
+    """Main UI rendering logic with collection management."""
     st.title("Research Grapher 🚀")
     st.markdown(f"Structure your research citations instantly using **{MODEL_NAME}**.")
-   
+    
+    # --- AUTHENTICATION MOCKUP ---
+    # In multi-user app, this comes from login session (e.g., st.session_state)
+    user_id = "user_123"
+
     # Initialize Core Classes
     db_manager = PaperDataManager(MONGO_URI)
     ai_analyzer = AIAnalyzer(GEMINI_API_KEY)
 
+    # --- COLLECTION MANAGEMENT ---
     with st.sidebar:
-        st.header("1. Collection Name")
-        collection_id = st.text_input("Enter collection name", value="My Research")
-        st.divider()
-        st.info("💡 Upload multiple PDFs to create a comprehensive graph.")
+        st.header("Workspace")
         
-    st.subheader("Upload Papers")
-    uploaded_files = st.file_uploader(
-        "Upload Research PDFs", 
-        type="pdf", 
-        accept_multiple_files=True 
-    )
-
-    if uploaded_files:
-        st.divider()
-        # Create a container for results
-        results_container = st.container()
+        # Fetch existing collections
+        existing_collections = db_manager.get_collections(user_id)
         
-        with results_container:
-            with st.spinner("🧠 AI is reading all papers..."):
-                all_papers_data = []
-                
-                for uploaded_file in uploaded_files:
-                    raw_text = parse_pdf(uploaded_file)
-                    if not raw_text:
-                        continue
+        # Option to create a new collection
+        new_collection_name = st.text_input("Or create new collection")
+        
+        # Selector for existing or new
+        collection_option = st.selectbox(
+            "Select Collection",
+            options=["-- Select --"] + existing_collections
+        )
+        
+        # Determine active collection
+        if new_collection_name:
+            active_collection = new_collection_name
+        elif collection_option != "-- Select --":
+            active_collection = collection_option
+        else:
+            active_collection = None
 
-                    # Extract Metadata
-                    extracted_data = ai_analyzer.extract_metadata(raw_text)
-                    
-                    if "error" in extracted_data:
-                        st.error(f"Error processing {uploaded_file.name}: {extracted_data['error']}")
-                        continue
-                    
-                    # Create Data Object (including Collection ID)
-                    current_paper = PaperMetadata(
-                        title=extracted_data.get('title', 'Unknown'),
-                        authors=extracted_data.get('authors', []),
-                        references=extracted_data.get('references', []),
-                        collection_id=collection_id, # Link to collection
-                        raw_text=raw_text
-                    )
-                    
-                    # Save to Database
-                    db_manager.save_paper(current_paper)
-                    all_papers_data.append(current_paper)
+        st.divider()
+        st.info("💡 Upload PDFs to create a graph for the active collection.")
 
-            if all_papers_data:
-                # Layout Results
-                col1, col2 = st.columns([1, 2])
-                
-                with col1:
-                    st.subheader("📄 Collection Summary")
-                    st.write(f"**Collection:** {collection_id}")
-                    st.write(f"**Papers Analyzed:** {len(all_papers_data)}")
+    if active_collection:
+        st.subheader(f"Current Workspace: **{active_collection}**")
+        
+        # Display existing papers in this collection
+        saved_papers = db_manager.get_papers_by_collection(user_id, active_collection)
+        
+        if saved_papers:
+            st.write(f"Found {len(saved_papers)} saved papers.")
+            render_results(saved_papers, active_collection)
+        else:
+            st.info("No papers saved for this collection yet.")
+
+        # --- UPLOAD SECTION ---
+        st.divider()
+        st.subheader("Add Papers to Collection")
+        uploaded_files = st.file_uploader(
+            "Upload Research PDFs", 
+            type="pdf", 
+            accept_multiple_files=True 
+        )
+
+        if uploaded_files:
+            # Container to show real-time processing
+            results_container = st.container()
+            
+            with results_container:
+                with st.spinner("🧠 AI is reading all papers..."):
+                    all_papers_data = []
                     
-                    # Display papers in a table
-                    paper_titles = [p.title for p in all_papers_data]
-                    st.dataframe(paper_titles, width='stretch')
-                    
-                with col2:
-                    st.subheader("🕸️ Comprehensive Citation Network")
-                    # Generate graph using ALL papers in the collection
-                    graph_html = GraphVisualizer.generate_comprehensive_graph(all_papers_data)
-                    components.html(graph_html, height=720)
+                    for uploaded_file in uploaded_files:
+                        # 1. Save file to server
+                        file_path = save_file_to_server(uploaded_file)
+
+                        # 2. Extract Text
+                        raw_text = parse_pdf(uploaded_file)
+
+                        # 3. AI Analysis
+                        extracted_data = ai_analyzer.extract_metadata(raw_text)
+
+                        # 4. Create Dataclass Object
+                        current_paper = PaperMetadata(
+                            title=extracted_data.get('title', 'Unknown'),
+                            authors=extracted_data.get('authors', []),
+                            references=extracted_data.get('references', []),
+                            collection_id=active_collection, # Using active_collection
+                            user_id=user_id,
+                            file_path=file_path
+                        )
+
+                        # 5. Save to Database
+                        db_manager.save_paper(current_paper)
+                        all_papers_data.append(asdict(current_paper))
+
+                # Display Results
+                if all_papers_data:
+                    render_results(all_papers_data, active_collection)
+    else:
+        st.info("Please select or create a collection in the sidebar to begin.")
 
 if __name__ == "__main__":
     render_ui()
