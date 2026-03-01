@@ -17,7 +17,7 @@ from streamlit_agraph import agraph, Node, Edge, Config
 
 # --- INITIALIZATION ---
 load_dotenv()
-st.set_page_config(page_title="Research Grapher", page_icon="🚀", layout="wide")
+st.set_page_config(page_title="Linked Lit", page_icon="📚", layout="wide")
 
 # --- CONSTANTS ---
 MODEL_NAME = 'gemini-2.5-flash'
@@ -423,7 +423,7 @@ def render_results(papers: List[Dict[str, Any]], collection_id: str):
 
 def render_ui():
     """Main UI rendering logic with collection management."""
-    st.title("Research Grapher 🚀")
+    st.title("📚Linked Lit")
     st.markdown(f"Structure your research citations instantly using **{MODEL_NAME}**.")
     
     # --- AUTHENTICATION MOCKUP ---
