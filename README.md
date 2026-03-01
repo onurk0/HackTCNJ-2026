@@ -2,13 +2,14 @@
 2026 tcnj hackathon
 
 # TODO
-- [ ] Ensure that papers that cite each other and cite the same papers are shown as such
-- [ ] Make it so that selecting collection in UI actually works
-- [ ] Fix Graph to make Circular again
 - [ ] Automatically add tags and color paper nodes accordingly
+- [ ] AI-based analysis to show how strongly connected papers are
+- [ ] Make it so that selecting collection in UI actually works
 - [ ] Universal Papers Search (by tag, name, author)
 - [ ] Paper info sidebar
-- [ ] Improve UI Logic
+- [x] Ensure that papers that cite each other and cite the same papers are shown as such
+- [x] Fix Graph to make Circular again
+- [x] Improve UI Logic
 
 # How to Run
 ## Natively
